@@ -1,0 +1,41 @@
+REFUND PROCESS and WRAP UP SPIEL
+
+SCENARIO 1
+- If they are not aware what antivirus or what type of subscription they have, you need to select Windows Defender and follow the suggested script.
+
+"When you purchased your computer, you paid for both the unit and Windows Defender. Since your current version of Windows is incompatible with Windows Defender, we will need to uninstall it and help you process a refund which is $150."
+
+SCENARIO 2
+- If the customer knows their antivirus, simply select the name of their antivirus and use the suggested script as a guide.
+
+"Your computer comes with Windows Defender, which provides a lifetime security. The store may have sold you extra antivirus software like McAfee for additional commission. Using both can cause a conflict, making both ineffective and this is the reason why you are getting that error message and got you locked out. I noticed you're paying $150 for your antivirus. They will process a refund of $150 and remove the antivirus from your computer."
+
+
+WRAP UP
+
+“Just a quick note—one of the refund managers from ____ will be calling you shortly to assist with the final step. Earlier, based on the fix we ran, we found out that:
+
+Either one of these:
+
+1. The Windows Defender isn’t compatible with the version of your Windows/Mac, which is why the uninstallation is necessary. 
+
+2. The extra antivirus ____ is conflicting with the existing Windows Defender, which is a built in antivirus for all Windows computer.
+
+Since we already send the Cancellation form to the ____, it's only fair that you receive a refund. In the meantime, please avoid using your computer until the refund manager has contacted you just to ensure everything goes smoothly. Please make sure to answer the call and they'll take it from there. Is everything clear before I let you go?
+
+FYNA In order to have a proper endorsement 
+
+Always make sure all agents follow to strict standards of closing. 
+
+1. Make sure they stated the reason why they will get a refund. 
+
+2. Make sure that they are readily available once the relevant team connects with them. 
+
+3. Remotes are useless if CX cannot stay in front of their computer and will be able to answer the other team's call.
+
+4. If CX is not available to wait, make sure to ask when is the best time for the refund team to reach them out and put in the brief description in the remote details.
+
+If none of these are on the call or any of these steps were missing, a written warning will be issued.
+
+The refund team will answer any questions you may have. 
+Please stay in front of your computer, and keep on the look out as the refund team will be reaching you out through your mobile phone. This is necessary for your refund to be processed. Exiting this page, moving your cursor around, and other unnecessary actions may cause complications and will render the refund process null. 

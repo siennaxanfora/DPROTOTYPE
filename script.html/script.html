@@ -1,0 +1,363 @@
+import React, { useMemo, useState, useEffect } from "react";
+
+// ============================= MODE & ENV ===============================
+// Runs in LOCAL mode by default (no external deps). If Supabase env vars exist,
+// we switch to CLOUD mode and lazy‑load @supabase/supabase-js at runtime.
+function getEnv(k){
+  if (typeof process !== 'undefined' && process.env && process.env[k]) return process.env[k];
+  if (typeof window !== 'undefined' && (window as any).__ENV__ && (window as any).__ENV__[k]) return (window as any).__ENV__[k];
+  return undefined;
+}
+const SUPABASE_URL = getEnv('NEXT_PUBLIC_SUPABASE_URL');
+const SUPABASE_ANON_KEY = getEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY');
+const USE_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+let __supa:any = null; // cached client
+
+async function ensureSupabase(){
+  if (!USE_SUPABASE) return null;
+  if (__supa) return __supa;
+  const mod = await import(/* webpackIgnore: true */ '@supabase/supabase-js').catch(()=>null);
+  if (!mod) return null; // fallback to local if lib not present
+  const { createClient } = mod as any;
+  __supa = createClient(SUPABASE_URL as string, SUPABASE_ANON_KEY as string);
+  return __supa;
+}
+
+// ============================= TYPES ====================================
+/** @typedef {{id:string,title:string,archetype:string,openers:string[],body:string,closers:string[]}} Spiel */
+/** @typedef {{id:string,title:string,archetype:string,duration?:string,agent:string,highlights:string[],audioUrl:string,transcript:string}} CallRec */
+
+// ============================= HELPERS ===================================
+const uid = () => (typeof crypto !== "undefined" && (crypto as any).randomUUID ? (crypto as any).randomUUID() : `id_${Date.now()}_${Math.random().toString(16).slice(2)}`);
+const ARCHETYPES = [
+  "Skeptical","Eloquent","Sharp-witted","Angry","Panicking","Afraid of Scam","Elderly/Slow-paced","Tech-savvy","Decision-maker",
+];
+
+const DEFAULT_SPIELS: Spiel[] = [
+  { id: uid(), title: "Legitimacy + Calm Authority (Skeptical)", archetype: "Skeptical",
+    openers:["You’re right to verify. Give me 30 seconds to show exactly who we are and why this matters."],
+    body: "Here’s verification you can check live: [Public page/link], case ID [####]. Once confirmed, we’ll secure your account and remove conflicting software.",
+    closers:["Does that match on your end? Great—let’s proceed step by step so you stay in control."] },
+  { id: uid(), title: "Empathy First, Boundary Next (Angry)", archetype: "Angry",
+    openers:["Your frustration is fair. My job is to solve this without wasting another minute."],
+    body: "We’ll move fast, but you keep veto power. If anything sounds off, say stop and I’ll explain options.",
+    closers:["If we fix it in one pass today, would that make this call worth it?"] },
+];
+
+const DEFAULT_CALLS: CallRec[] = [
+  { id: uid(), title: "Skeptic to Yes in 3 Minutes", archetype: "Skeptical", duration: "23:14", agent: "Nirvana",
+    highlights:["Live-verification at 01:42","Client agrees at 03:12"], audioUrl: "",
+    transcript: `CLIENT: How do I know you're legit?\nAGENT: Good question — open this link while we stay on the line…` },
+];
+
+// ============================= STORAGE (LOCAL) ===========================
+const LS_KEY = "agent-playbook-store-v1";
+function loadStoreLS(){
+  try { const raw = localStorage.getItem(LS_KEY); return raw? JSON.parse(raw): { spiels: DEFAULT_SPIELS, calls: DEFAULT_CALLS }; } catch { return { spiels: DEFAULT_SPIELS, calls: DEFAULT_CALLS }; }
+}
+function saveStoreLS(data:{spiels:Spiel[];calls:CallRec[]}){ localStorage.setItem(LS_KEY, JSON.stringify(data)); }
+function uploadAudioLocal(file:File){ try { return URL.createObjectURL(file); } catch { return ""; } }
+
+// ============================= STORAGE (SUPABASE) ========================
+async function listSpielsCloud():Promise<Spiel[]>{
+  const c = await ensureSupabase(); if (!c) return [];
+  const { data, error } = await c.from('spiels').select('id,title,archetype,openers,body,closers').order('created_at',{ascending:false});
+  if (error) throw error; return (data||[]) as Spiel[];
+}
+async function addSpielCloud(s:Spiel){ const c = await ensureSupabase(); if (!c) return; const { error } = await c.from('spiels').insert(s); if (error) throw error; }
+async function listCallsCloud():Promise<CallRec[]>{
+  const c = await ensureSupabase(); if (!c) return [];
+  const { data, error } = await c.from('calls').select('id,title,archetype,duration,agent,highlights,audio_url,transcript').order('created_at',{ascending:false});
+  if (error) throw error;
+  return (data||[]).map((r:any)=>({ id:r.id,title:r.title,archetype:r.archetype,duration:r.duration||'',agent:r.agent,highlights:r.highlights||[],audioUrl:r.audio_url||'',transcript:r.transcript||'' }));
+}
+async function addCallCloud(ca:CallRec){ const c = await ensureSupabase(); if (!c) return; const row = { id:ca.id,title:ca.title,archetype:ca.archetype,duration:ca.duration||'',agent:ca.agent,highlights:ca.highlights||[],audio_url:ca.audioUrl||'',transcript:ca.transcript||'' }; const { error } = await c.from('calls').insert(row); if (error) throw error; }
+async function uploadAudioCloud(file:File){
+  const c = await ensureSupabase(); if (!c) return "";
+  const path = `audio/${uid()}.${(file.name.split('.').pop()||'mp3')}`;
+  const { error } = await c.storage.from('calls-audio').upload(path, file, { cacheControl:'3600', upsert:false });
+  if (error) throw error; const { data } = c.storage.from('calls-audio').getPublicUrl(path); return (data && (data as any).publicUrl) || "";
+}
+
+// ============================= COMPONENT =================================
+export default function AgentPlaybookApp(){
+  const init = loadStoreLS();
+  const [mode, setMode] = useState<string>(USE_SUPABASE? 'CLOUD':'LOCAL');
+  const [tab, setTab] = useState('spiels');
+  const [query, setQuery] = useState('');
+  const [archFilter, setArchFilter] = useState('all');
+  const [spiels, setSpiels] = useState<Spiel[]>(init.spiels);
+  const [calls, setCalls] = useState<CallRec[]>(init.calls);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string|undefined>(undefined);
+
+  // Load from cloud if available
+  useEffect(()=>{
+    let alive = true;
+    (async()=>{
+      if (!USE_SUPABASE) return; setLoading(true); setError(undefined);
+      const c = await ensureSupabase(); if (!c) { setMode('LOCAL'); setLoading(false); return; }
+      try {
+        const [S,C] = await Promise.all([listSpielsCloud(), listCallsCloud()]);
+        if (!alive) return;
+        setSpiels(S.length? S: DEFAULT_SPIELS);
+        setCalls(C.length? C: DEFAULT_CALLS);
+        setMode('CLOUD');
+      } catch(e:any){ setError(e?.message||'Cloud load failed'); setMode('LOCAL'); }
+      finally { setLoading(false); }
+    })();
+    return ()=>{ alive = false; };
+  },[]);
+
+  // Persist locally for both modes
+  useEffect(()=>{ saveStoreLS({ spiels, calls }); }, [spiels, calls]);
+
+  // ---------- Filters ----------
+  const filteredSpiels = useMemo(()=>{
+    const q = query.trim().toLowerCase();
+    return spiels.filter(s=>{
+      const archOk = archFilter==='all' || s.archetype===archFilter;
+      if (!q) return archOk;
+      const hay = [s.title,s.archetype,s.body,...s.openers,...s.closers].join('\n').toLowerCase();
+      return archOk && hay.includes(q);
+    });
+  },[spiels, query, archFilter]);
+
+  const filteredCalls = useMemo(()=>{
+    const q = query.trim().toLowerCase();
+    return calls.filter(c=>{
+      const archOk = archFilter==='all' || c.archetype===archFilter;
+      if (!q) return archOk;
+      const hay = [c.title,c.archetype,c.agent,c.transcript,...(c.highlights||[])].join('\n').toLowerCase();
+      return archOk && hay.includes(q);
+    });
+  },[calls, query, archFilter]);
+
+  // ---------- Add Spiel ----------
+  const [sForm, setSForm] = useState({ title:'', archetype: ARCHETYPES[0], opener:'', body:'', closer:'' });
+  async function addSpiel(){
+    if (!sForm.title.trim()) { alert('Title required'); return; }
+    const toAdd:Spiel = { id: uid(), title: sForm.title.trim(), archetype: sForm.archetype, openers: sForm.opener? [sForm.opener]:[], body: sForm.body, closers: sForm.closer? [sForm.closer]:[] };
+    setSpiels(p=>[toAdd, ...p]);
+    if (mode==='CLOUD') { try { await addSpielCloud(toAdd); } catch(e:any){ setError(e?.message||'Cloud insert failed'); } }
+    setSForm({ title:'', archetype: sForm.archetype, opener:'', body:'', closer:'' });
+  }
+
+  // ---------- Upload Call (MP3 + Transcript) ----------
+  const [cForm, setCForm] = useState({ title:'', archetype: ARCHETYPES[0], agent:'', duration:'', highlights:'', transcript:'', file: null as File|null });
+  function resetCallForm(){ setCForm({ title:'', archetype: cForm.archetype, agent:'', duration:'', highlights:'', transcript:'', file: null }); }
+
+  async function handleUpload(){
+    if (!cForm.title.trim() || !cForm.agent.trim()) { alert('Title and Agent required'); return; }
+    if (!cForm.file && !cForm.transcript.trim()) { alert('Provide an MP3 or a transcript (or both)'); return; }
+
+    let audioUrl = '';
+    try {
+      if (cForm.file) {
+        if (mode==='CLOUD') audioUrl = await uploadAudioCloud(cForm.file);
+        else audioUrl = uploadAudioLocal(cForm.file);
+      }
+    } catch(e:any) { setError(e?.message||'Audio upload failed'); }
+
+    const newCall:CallRec = { id: uid(), title: cForm.title.trim(), archetype: cForm.archetype, duration: cForm.duration.trim(), agent: cForm.agent.trim(), highlights: cForm.highlights.split('\n').map(s=>s.trim()).filter(Boolean), audioUrl, transcript: cForm.transcript };
+    setCalls(p=>[newCall, ...p]);
+    if (mode==='CLOUD') { try { await addCallCloud(newCall); } catch(e:any){ setError(e?.message||'Cloud insert failed'); } }
+    resetCallForm(); setTab('calls');
+  }
+
+  // ---------- Import/Export JSON ----------
+  function doExport(){ const data = { spiels, calls }; const blob = new Blob([JSON.stringify(data,null,2)],{ type:'application/json'}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href=url; a.download='agent-playbook.json'; a.click(); URL.revokeObjectURL(url); }
+  function onImportFile(e:any){ const f = e.target.files && e.target.files[0]; if(!f) return; const fr = new FileReader(); fr.onload=()=>{ try{ const json = JSON.parse(String(fr.result||'{}')); if(Array.isArray(json.spiels)) setSpiels(json.spiels); if(Array.isArray(json.calls)) setCalls(json.calls); }catch{ alert('Import failed: invalid JSON'); } }; fr.readAsText(f); }
+
+  // ---------- Dev Checks (acts like tests) ----------
+  const devChecks = useMemo(()=>{
+    const checks:[string,boolean][] = [];
+    try {
+      const s = 'a\n\n b \n'.split('\n').filter(Boolean); checks.push(['newline split', s.length===2 && s[0]==='a' && s[1].trim()==='b']);
+      const ex = JSON.stringify({ spiels, calls }); checks.push(['export JSON', typeof ex==='string' && ex.startsWith('{') && ex.includes('spiels')]);
+      checks.push(['archetypes non-empty', ARCHETYPES.length>0]);
+      const hay = [DEFAULT_CALLS[0].title, DEFAULT_CALLS[0].transcript].join(' ').toLowerCase(); checks.push(['search baseline', hay.includes('skeptic')]);
+      const joined = ['x','y'].join('\n\n'); checks.push(['copy joiner', /x\n\ny/.test(joined)]);
+    } catch { checks.push(['runtime', false]); }
+    return checks;
+  },[spiels, calls]);
+
+  // ============================= UI =======================================
+  return (
+    <div className="min-h-screen bg-neutral-50 text-neutral-900">
+      <header className="sticky top-0 z-10 border-b bg-white/80 backdrop-blur">
+        <div className="mx-auto max-w-6xl px-4 py-3 flex items-center gap-3">
+          <div className="font-semibold text-lg">Agent Playbook <span className="text-xs ml-2 px-2 py-0.5 rounded border">Mode: {mode}{loading? ' (loading…)':''}</span></div>
+          <div className="ml-auto flex items-center gap-2">
+            <button className="px-3 py-1.5 border rounded" onClick={doExport}>Export</button>
+            <label className="px-3 py-1.5 border rounded cursor-pointer">Import<input type="file" accept="application/json" className="hidden" onChange={onImportFile} /></label>
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto max-w-6xl px-4 py-6">
+        {error && (<div className="mb-4 text-sm text-red-700 border border-red-200 bg-red-50 p-2 rounded">{String(error)}</div>)}
+
+        {/* Filters */}
+        <div className="flex flex-wrap gap-2 items-center mb-4">
+          <select className="border rounded px-2 py-1" value={archFilter} onChange={(e)=>setArchFilter((e.target as any).value)}>
+            <option value="all">All client types</option>
+            {ARCHETYPES.map(a=> <option key={a} value={a}>{a}</option>)}
+          </select>
+          <input className="border rounded px-3 py-1 flex-1 min-w-[220px]" placeholder="Search spiels, calls, transcripts…" value={query} onChange={(e)=>setQuery((e.target as any).value)} />
+        </div>
+
+        {/* Tabs */}
+        <div className="mb-4 flex gap-2">
+          {[['spiels','Spiels Library'],['calls','Best Calls'],['builder','Script Builder'],['upload','Upload New Call']].map(([val,label])=> (
+            <button key={val} onClick={()=>setTab(val)} className={`px-3 py-1.5 rounded border ${tab===val? 'bg-black text-white':'bg-white'}`}>{label}</button>
+          ))}
+        </div>
+
+        {/* Tab: Spiels */}
+        {tab==='spiels' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {filteredSpiels.map(s=> (
+              <div key={s.id} className="border rounded-xl bg-white p-3 shadow-sm">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <div className="font-semibold truncate">{s.title}</div>
+                  <span className="text-xs border rounded px-2 py-0.5 bg-neutral-50">{s.archetype}</span>
+                </div>
+                <div className="text-xs uppercase text-neutral-500">Opener</div>
+                <div className="mt-1 bg-neutral-100 rounded p-2 text-sm">{s.openers[0]||'—'}</div>
+                <div className="mt-2 text-xs uppercase text-neutral-500">Body</div>
+                <pre className="mt-1 bg-neutral-100 rounded p-2 text-sm whitespace-pre-wrap">{s.body}</pre>
+                <div className="mt-2 text-xs uppercase text-neutral-500">Closer</div>
+                <div className="mt-1 bg-neutral-100 rounded p-2 text-sm">{s.closers[0]||'—'}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Tab: Calls */}
+        {tab==='calls' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {filteredCalls.map(c=> (
+              <div key={c.id} className="border rounded-xl bg-white p-3 shadow-sm">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="font-semibold truncate">{c.title}</div>
+                  <span className="text-xs border rounded px-2 py-0.5 bg-neutral-50">{c.archetype}</span>
+                </div>
+                <div className="text-sm text-neutral-600">Agent: <b>{c.agent}</b>{c.duration? <> • Duration: {c.duration}</> : null}</div>
+                {c.audioUrl ? (
+                  <audio controls className="w-full mt-2"><source src={c.audioUrl} type="audio/mpeg" /></audio>
+                ) : (
+                  <div className="mt-2 text-xs text-neutral-500">No audio attached</div>
+                )}
+                <div className="mt-2">
+                  <div className="text-xs uppercase text-neutral-500">Highlights</div>
+                  <ul className="list-disc pl-5 text-sm mt-1 space-y-1">{(c.highlights||[]).map((h,i)=>(<li key={i}>{h}</li>))}</ul>
+                </div>
+                <details className="bg-neutral-100 rounded p-2 mt-2">
+                  <summary className="cursor-pointer text-sm font-medium">Transcript</summary>
+                  <pre className="whitespace-pre-wrap text-sm mt-2">{c.transcript}</pre>
+                </details>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Tab: Builder */}
+        {tab==='builder' && (
+          <div className="border rounded-xl bg-white p-4 shadow-sm space-y-3">
+            <div className="grid md:grid-cols-2 gap-3">
+              <div>
+                <label className="text-sm font-medium">Client Archetype</label>
+                <select className="mt-1 border rounded px-2 py-1 w-full" value={sForm.archetype} onChange={(e)=>setSForm({...sForm, archetype:(e.target as any).value})}>{ARCHETYPES.map(a=><option key={a} value={a}>{a}</option>)}</select>
+              </div>
+              <div>
+                <label className="text-sm font-medium">Title</label>
+                <input className="mt-1 border rounded px-2 py-1 w-full" value={sForm.title} onChange={(e)=>setSForm({...sForm, title:(e.target as any).value})} placeholder="e.g., Calm Authority for Skeptics" />
+              </div>
+            </div>
+            <div className="grid md:grid-cols-3 gap-3">
+              <div>
+                <label className="text-sm font-medium">Opener</label>
+                <textarea className="mt-1 border rounded px-2 py-1 w-full" rows={5} value={sForm.opener} onChange={(e)=>setSForm({...sForm, opener:(e.target as any).value})} placeholder="Empathize + verification promise…" />
+              </div>
+              <div>
+                <label className="text-sm font-medium">Body</label>
+                <textarea className="mt-1 border rounded px-2 py-1 w-full" rows={5} value={sForm.body} onChange={(e)=>setSForm({...sForm, body:(e.target as any).value})} placeholder="Step-by-step path, choices, time-box…" />
+              </div>
+              <div>
+                <label className="text-sm font-medium">Closer</label>
+                <textarea className="mt-1 border rounded px-2 py-1 w-full" rows={5} value={sForm.closer} onChange={(e)=>setSForm({...sForm, closer:(e.target as any).value})} placeholder="Clear next action + opt-out safety…" />
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button className="px-3 py-1.5 rounded bg-black text-white" onClick={addSpiel}>Save to Library</button>
+              <button className="px-3 py-1.5 rounded border" onClick={()=>{ const t=[sForm.opener,sForm.body,sForm.closer].filter(Boolean).join('\n\n'); if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(t).catch(()=>{}); } }}>Copy Draft</button>
+            </div>
+            <div className="text-xs text-neutral-500">Tip: keep openers under 12 seconds; time-box promises (e.g., "5 minutes to fix root cause").</div>
+          </div>
+        )}
+
+        {/* Tab: Upload */}
+        {tab==='upload' && (
+          <div className="border rounded-xl bg-white p-4 shadow-sm space-y-3">
+            <div className="grid md:grid-cols-2 gap-3">
+              <div>
+                <label className="text-sm font-medium">Title</label>
+                <input className="mt-1 border rounded px-2 py-1 w-full" value={cForm.title} onChange={(e)=>setCForm({...cForm, title:(e.target as any).value})} placeholder="e.g., Skeptic to Yes in 3 Minutes" />
+              </div>
+              <div>
+                <label className="text-sm font-medium">Agent</label>
+                <input className="mt-1 border rounded px-2 py-1 w-full" value={cForm.agent} onChange={(e)=>setCForm({...cForm, agent:(e.target as any).value})} placeholder="e.g., Nirvana" />
+              </div>
+            </div>
+            <div className="grid md:grid-cols-3 gap-3">
+              <div>
+                <label className="text-sm font-medium">Client Archetype</label>
+                <select className="mt-1 border rounded px-2 py-1 w-full" value={cForm.archetype} onChange={(e)=>setCForm({...cForm, archetype:(e.target as any).value})}>{ARCHETYPES.map(a=> <option key={a} value={a}>{a}</option>)}</select>
+              </div>
+              <div>
+                <label className="text-sm font-medium">Duration (optional)</label>
+                <input className="mt-1 border rounded px-2 py-1 w-full" value={cForm.duration} onChange={(e)=>setCForm({...cForm, duration:(e.target as any).value})} placeholder="23:14" />
+              </div>
+              <div>
+                <label className="text-sm font-medium">Audio (MP3/M4A/WAV)</label>
+                <input className="mt-1 border rounded px-2 py-1 w-full" type="file" accept="audio/*" onChange={(e)=>setCForm({...cForm, file: ((e.target as any).files && (e.target as any).files[0]) || null})} />
+              </div>
+            </div>
+            <div>
+              <label className="text-sm font-medium">Highlights (one per line)</label>
+              <textarea className="mt-1 border rounded px-2 py-1 w-full" rows={3} value={cForm.highlights} onChange={(e)=>setCForm({...cForm, highlights:(e.target as any).value})} placeholder={`Live verification at 01:42\nAgreement at 03:12`} />
+            </div>
+            <div>
+              <label className="text-sm font-medium">Transcript (paste or leave blank to add later)</label>
+              <textarea className="mt-1 border rounded px-2 py-1 w-full" rows={8} value={cForm.transcript} onChange={(e)=>setCForm({...cForm, transcript:(e.target as any).value})} placeholder="Paste clean transcript here…" />
+            </div>
+            <div className="flex gap-2">
+              <button className="px-3 py-1.5 rounded bg-black text-white" onClick={handleUpload}>Upload</button>
+              <button className="px-3 py-1.5 rounded border" onClick={()=>setCForm({ title:'', archetype: cForm.archetype, agent:'', duration:'', highlights:'', transcript:'', file:null })}>Reset</button>
+            </div>
+            <div className="text-xs text-neutral-500">Tip: For large audio, compress to mono 64–96 kbps before upload.</div>
+          </div>
+        )}
+
+        {/* Dev checks */}
+        <div className="mt-6 border rounded-xl bg-white p-3">
+          <div className="text-sm font-semibold mb-2">Developer Checks</div>
+          <ul className="text-sm list-disc pl-5">
+            {devChecks.map(([name, pass], i)=> (
+              <li key={i} className={pass? 'text-green-700':'text-red-700'}>{String(name)}: {pass? 'PASS':'FAIL'}</li>
+            ))}
+          </ul>
+        </div>
+      </main>
+
+      <footer className="border-t mt-8">
+        <div className="mx-auto max-w-6xl px-4 py-6 text-sm text-neutral-500 flex flex-wrap items-center gap-2">
+          <span>© {new Date().getFullYear()} Agent Playbook</span>
+          <span className="mx-2">•</span>
+          <span>Training toolkit for call center conversion & de-escalation</span>
+        </div>
+      </footer>
+    </div>
+  );
+}
